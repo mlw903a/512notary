@@ -4,7 +4,7 @@ Static customer booking prototype, not a live service. Pilot ZIPs: 78732 (Mark),
 
 All dates/times are sample inventory in Central Time. Payments, confirmations, requests, cancellations, and rescheduling are simulated in volatile browser memory. No payment credentials, real appointments, outgoing messages, backend data, analytics requests, or browser persistence. Fonts load from Google Fonts with system fallbacks.
 
-The proposed $75 offer: $65 mobile service plus $10 for one acknowledgment for one signature. Fees, supported acts, identification guidance, provider readiness, address boundaries, travel buffers, availability, policies, payment integration, and communications require completion before live launch.
+The proposed $75 offer covers travel plus up to five routine notarizations for one signer. The live system will need to capture the number and type of notarial acts and itemize statutory and non-notarial charges correctly while preserving the quoted total. Fees, supported acts, identification guidance, provider readiness, address boundaries, travel buffers, availability, policies, payment integration, and communications require completion before live launch.
 
 ## Validation
 
