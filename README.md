@@ -1,6 +1,8 @@
 # 512Notary private booking pilot · v0.4
 
-Local, persistent test-mode booking system. The previously published v2 site is unchanged: on September 15, 2026, the current Sites connection returned `Sites project not found` for the project in `.openai/hosting.json`; owned Sites listing was empty. Restore the connection to the original OceanBags workspace/account before publishing. Do not create a replacement project or overwrite the project ID.
+Local and hosted persistent private test system. Sites access was restored and the updated booking system published on September 15, 2026. Access is owner-only. Keep the project ID unchanged.
+
+Latest request-first revision: continuous blue-512/black-notary wordmarks without periods; stacked “A notary at your door”; new records use `pending_confirmation`, not automatic confirmation. The $75 quote remains visible, but simulated checkout is removed and no payment information is collected. Pending requests generate only a saved acknowledgment preview, not an appointment reminder. Existing test records remain usable. New requests hold their test slots; expiry, operator confirmation, and notification delivery are still launch work. Recipient addresses and a sending connection are needed before email delivery can be completed. Do not make public or represent this as a live service yet.
 
 ## What works
 

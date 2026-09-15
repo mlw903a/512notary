@@ -23,15 +23,15 @@ test('Central Time handles both daylight-saving transitions',()=>{
   assert.equal(new Date(epoch('2026-11-02',8)).toISOString(),'2026-11-02T14:00:00.000Z');
 });
 test('booking persists with server price, five included, no actual charge or messages',async t=>{
-  const DB=openDatabase();t.after(()=>DB.close());const r=await call(DB,undefined,input());assert.equal(r.status,201);assert.equal(r.data.booking.total,7500);assert.equal(r.data.booking.quantity,5);assert.equal(r.data.booking.chargedCents,0);assert.equal(r.data.booking.messagesSent,false);assert.equal(r.data.booking.owner,undefined);
-  const read=await call(DB,`/api/bookings/${r.data.booking.id}`);assert.equal(read.data.notifications.length,2);assert.ok(read.data.notifications.every(n=>n.status==='preview'));
+  const DB=openDatabase();t.after(()=>DB.close());const r=await call(DB,undefined,input());assert.equal(r.status,201);assert.equal(r.data.booking.total,7500);assert.equal(r.data.booking.quantity,5);assert.equal(r.data.booking.status,'pending_confirmation');assert.equal(r.data.booking.paymentStatus,'not_requested');assert.equal(r.data.booking.chargedCents,0);assert.equal(r.data.booking.messagesSent,false);assert.equal(r.data.booking.owner,undefined);
+  const read=await call(DB,`/api/bookings/${r.data.booking.id}`);assert.equal(read.data.notifications.length,1);assert.ok(read.data.notifications.every(n=>n.status==='preview'));
 });
 test('concurrent duplicate checkout is idempotent and mismatched reuse fails',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());const data=input();const results=await Promise.all([call(DB,undefined,data),call(DB,undefined,data)]);assert.ok(results.every(r=>r.status===201));assert.ok(results.some(r=>r.data.duplicate));assert.equal((await call(DB)).data.bookings.length,1);
   assert.equal((await call(DB,undefined,{...data,quantity:2})).status,409);
 });
 test('concurrent contenders: one slot, one booking, no orphan confirmation',async t=>{
-  const DB=openDatabase();t.after(()=>DB.close());const results=await Promise.all([call(DB,undefined,input()),call(DB,undefined,input(),'other')]);assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM bookings').first()).n,1);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM notifications').first()).n,2);
+  const DB=openDatabase();t.after(()=>DB.close());const results=await Promise.all([call(DB,undefined,input()),call(DB,undefined,input(),'other')]);assert.deepEqual(results.map(r=>r.status).sort(),[201,409]);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM bookings').first()).n,1);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM notifications').first()).n,1);
 });
 test('Manor and Bastrop share Haydn plus travel gap; Mark can book simultaneously',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());assert.equal((await call(DB,undefined,input('78653'))).status,201);
@@ -42,17 +42,17 @@ test('Manor and Bastrop share Haydn plus travel gap; Mark can book simultaneousl
 test('failed reschedule rolls back; success changes locks; stale version rejected',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());const a=(await call(DB,undefined,input())).data.booking;await call(DB,undefined,input('78732',start+3*HOUR));
   assert.equal((await call(DB,`/api/bookings/${a.id}`,{action:'reschedule',version:1,start:start+3*HOUR})).status,409);
-  const old=await call(DB,`/api/bookings/${a.id}`);assert.equal(old.data.booking.start,start);assert.equal(old.data.notifications.length,2);
+  const old=await call(DB,`/api/bookings/${a.id}`);assert.equal(old.data.booking.start,start);assert.equal(old.data.notifications.length,1);
   const changed=await call(DB,`/api/bookings/${a.id}`,{action:'reschedule',version:1,start:start+6*HOUR});assert.equal(changed.status,200);assert.equal(changed.data.booking.version,2);
   assert.equal((await call(DB,`/api/bookings/${a.id}`,{action:'cancel',version:1})).status,409);assert.equal((await call(DB,undefined,input())).status,201);
 });
 test('concurrent modifications preserve a single valid reservation and outbox',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());const b=(await call(DB,undefined,input())).data.booking;
-  const results=await Promise.all([call(DB,`/api/bookings/${b.id}`,{action:'reschedule',version:1,start:start+3*HOUR}),call(DB,`/api/bookings/${b.id}`,{action:'reschedule',version:1,start:start+6*HOUR})]);assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);const current=(await call(DB,`/api/bookings/${b.id}`)).data;assert.equal(current.booking.version,2);assert.equal(current.notifications.length,4);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM slot_locks').first()).n,2);
+  const results=await Promise.all([call(DB,`/api/bookings/${b.id}`,{action:'reschedule',version:1,start:start+3*HOUR}),call(DB,`/api/bookings/${b.id}`,{action:'reschedule',version:1,start:start+6*HOUR})]);assert.deepEqual(results.map(r=>r.status).sort(),[200,409]);const current=(await call(DB,`/api/bookings/${b.id}`)).data;assert.equal(current.booking.version,2);assert.equal(current.notifications.length,2);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM slot_locks').first()).n,2);
 });
-test('cancellation frees slots and supersedes reminder; retry is safe',async t=>{
+test('cancellation frees slots; pending requests have no reminders; retry is safe',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());const b=(await call(DB,undefined,input())).data.booking;const cancel={action:'cancel',version:1};assert.equal((await call(DB,`/api/bookings/${b.id}`,cancel)).status,200);assert.equal((await call(DB,`/api/bookings/${b.id}`,cancel)).status,200);
-  const r=await call(DB,`/api/bookings/${b.id}`);assert.equal(r.data.notifications.length,3);assert.equal(r.data.notifications.find(n=>n.kind==='reminder').status,'superseded');assert.equal((await call(DB,undefined,input())).status,201);
+  const r=await call(DB,`/api/bookings/${b.id}`);assert.equal(r.data.notifications.length,2);assert.equal(r.data.notifications.some(n=>n.kind==='reminder'),false);assert.equal((await call(DB,undefined,input())).status,201);
 });
 test('identity, ownership, same-origin, coverage, quantity and readiness are enforced',async t=>{
   const DB=openDatabase();t.after(()=>DB.close());assert.equal((await call(DB,'/api/bookings',undefined,null)).status,401);

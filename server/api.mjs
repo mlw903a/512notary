@@ -16,14 +16,14 @@ async function body(request){
   if(!value||typeof value!=='object'||Array.isArray(value))fail('Invalid request data.');return value;
 }
 async function fingerprint(value){const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value)));return Array.from(new Uint8Array(bytes),x=>x.toString(16).padStart(2,'0')).join('');}
-function publicBooking(b){const {owner,fingerprint,...safe}=b;return {...safe,source:JSON.parse(b.source),mode:'test',chargedCents:0,paymentStatus:'simulated',messagesSent:false};}
+function publicBooking(b){const {owner,fingerprint,...safe}=b;return {...safe,source:JSON.parse(b.source),mode:'test',chargedCents:0,paymentStatus:'not_requested',messagesSent:false};}
 const owned=(db,bookingId,owner)=>db.sql('SELECT * FROM bookings WHERE id = ? AND owner = ?',bookingId,owner).first();
 function noteStatements(db,b,kind,now){
   const ref=`512-${b.id.slice(0,8).toUpperCase()}`;
-  const message=`${kind==='cancellation'?'Cancelled test appointment':'Test appointment'} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a saved test booking. No payment was collected and no real service is scheduled.`;
+  const message=`${kind==='cancellation'?'Cancelled test request':b.status==='pending_confirmation'?'Appointment request awaiting confirmation':'Test appointment'} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a private test. A request is not a confirmed appointment. No real service is scheduled.`;
   const insert=(type,due,subject)=>db.sql('INSERT INTO notifications (id, booking_id, owner, kind, recipient, subject, body, due_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',crypto.randomUUID(),b.id,b.owner,type,b.email,subject,message,due,'preview');
   const result=[insert(kind,now,`${ref} — ${kind}`)];
-  if(kind!=='cancellation')result.push(insert('reminder',Math.max(now,b.start-2*HOUR),`${ref} — appointment reminder`));
+  if(kind!=='cancellation'&&b.status!=='pending_confirmation')result.push(insert('reminder',Math.max(now,b.start-2*HOUR),`${ref} — appointment reminder`));
   return result;
 }
 async function readBooking(db,bookingId,owner){const b=await owned(db,bookingId,owner);if(!b)fail('Appointment not found.',404);return b;}
@@ -37,10 +37,10 @@ async function createBooking(db,owner,data,now){
   const previous=await owned(db,bookingId,owner);
   if(previous){if(previous.fingerprint!==digest)fail('That checkout request was already used for different details.',409);return {booking:publicBooking(previous),duplicate:true};}
   const slot=validSlot(data.start,now);if(!slot)fail('That time is outside the available schedule. Choose another time.',409);
-  const b={id:bookingId,owner,provider:zone.provider,zip:data.zip,start:slot.start,end:slot.end,...details};
-  const statements=[db.sql('INSERT INTO bookings (id, owner, provider, zip, start, end, name, email, address, quantity, total, status, version, fingerprint, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',b.id,owner,b.provider,b.zip,b.start,b.end,b.name,b.email,b.address,b.quantity,7500,'test_confirmed',1,digest,source(data.source),now),
+  const b={id:bookingId,owner,provider:zone.provider,zip:data.zip,start:slot.start,end:slot.end,status:'pending_confirmation',...details};
+  const statements=[db.sql('INSERT INTO bookings (id, owner, provider, zip, start, end, name, email, address, quantity, total, status, version, fingerprint, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',b.id,owner,b.provider,b.zip,b.start,b.end,b.name,b.email,b.address,b.quantity,7500,'pending_confirmation',1,digest,source(data.source),now),
     ...occupiedTimes(b.start).map(t=>db.sql('INSERT INTO slot_locks (provider, slot, booking_id) VALUES (?, ?, ?)',b.provider,t,b.id)),
-    ...noteStatements(db,b,'confirmation',now)];
+    ...noteStatements(db,b,'request_received',now)];
   try{await db.batch(statements);}catch(error){
     const repeated=await owned(db,bookingId,owner);
     if(repeated?.fingerprint===digest)return {booking:publicBooking(repeated),duplicate:true};
@@ -52,16 +52,16 @@ async function createBooking(db,owner,data,now){
 async function changeBooking(db,owner,bookingId,data,now){
   const b=await readBooking(db,bookingId,owner);
   if(data.action==='cancel'&&b.status==='cancelled')return {booking:publicBooking(b)};
-  if(b.status!=='test_confirmed')fail('Only active test appointments can be changed.',409);
+  if(!['test_confirmed','pending_confirmation'].includes(b.status))fail('Only active test appointments can be changed.',409);
   if(data.version!==b.version)fail('This appointment changed. Reload it before trying again.',409);
   let sql,updated;
   if(data.action==='reschedule'){
     const slot=validSlot(data.start,now);if(!slot)fail('Choose a time within the available schedule.',409);
     updated={...b,start:slot.start,end:slot.end};
-    sql=db.sql("UPDATE bookings SET start = ?, end = ?, version = CASE WHEN version = ? AND status = 'test_confirmed' THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",slot.start,slot.end,b.version,b.id,owner);
+    sql=db.sql("UPDATE bookings SET start = ?, end = ?, version = CASE WHEN version = ? AND status IN ('test_confirmed', 'pending_confirmation') THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",slot.start,slot.end,b.version,b.id,owner);
   }else if(data.action==='cancel'){
     updated={...b,status:'cancelled'};
-    sql=db.sql("UPDATE bookings SET status = 'cancelled', version = CASE WHEN version = ? AND status = 'test_confirmed' THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",b.version,b.id,owner);
+    sql=db.sql("UPDATE bookings SET status = 'cancelled', version = CASE WHEN version = ? AND status IN ('test_confirmed', 'pending_confirmation') THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",b.version,b.id,owner);
   }else fail('Unknown appointment action.');
   const statements=[sql,db.sql('DELETE FROM slot_locks WHERE booking_id = ?',b.id),
     ...(data.action==='reschedule'?occupiedTimes(updated.start).map(t=>db.sql('INSERT INTO slot_locks (provider, slot, booking_id) VALUES (?, ?, ?)',b.provider,t,b.id)):[]),
@@ -74,7 +74,7 @@ async function changeBooking(db,owner,bookingId,data,now){
 export async function handleApi(request,env,now=Date.now()){
   const url=new URL(request.url),path=url.pathname;
   try{
-    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'simulated',email:'preview_only'});
+    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:'preview_only'});
     const owner=requireOwner(request),db=database(env);
     if(request.method==='GET'&&path==='/api/availability'){
       const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
