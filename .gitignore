@@ -1,3 +1,10 @@
 .DS_Store
 *.tar.gz
 *.tgz
+node_modules/
+.build/
+.local/
+.env
+.sites-runtime/
+dist/server/
+dist/.openai/
