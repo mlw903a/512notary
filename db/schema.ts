@@ -1,4 +1,5 @@
 import { sqliteTable, text, integer, primaryKey, index } from 'drizzle-orm/sqlite-core';
+export const rateLimits = sqliteTable('rate_limits', {bucket:text('bucket').primaryKey(),hits:integer('hits').notNull()});
 
 export const bookings = sqliteTable('bookings', {
   id: text('id').primaryKey(), owner: text('owner').notNull(),

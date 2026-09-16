@@ -1,5 +1,6 @@
 import {database} from './database.mjs';
 import {deliverNotifications} from './email.mjs';
+import {guestToken,guestOwner,managementUrl,throttle} from './guest.mjs';
 import {ZONES,RULES,HOUR,scheduledSlots,validSlot,occupiedTimes,formatWhen} from './schedule.mjs';
 
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
@@ -20,12 +21,17 @@ async function body(request){
 async function fingerprint(value){const bytes=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(value)));return Array.from(new Uint8Array(bytes),x=>x.toString(16).padStart(2,'0')).join('');}
 function publicBooking(b){const {owner,fingerprint,...safe}=b;return {...safe,source:JSON.parse(b.source),mode:'test',chargedCents:0,paymentStatus:'not_requested',messagesSent:false};}
 const owned=(db,bookingId,owner)=>db.sql('SELECT * FROM bookings WHERE id = ? AND owner = ?',bookingId,owner).first();
-function noteStatements(db,b,kind,now){
+async function noteStatements(db,b,kind,now){
   const ref=`512-${b.id.slice(0,8).toUpperCase()}`;
   const label=b.status==='declined'?'Request declined':kind==='confirmation'?'Appointment confirmed for testing':kind==='cancellation'?'Cancelled test request':b.status==='pending_confirmation'?'Appointment request awaiting confirmation':'Test appointment';
-  const message=`${label} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a private test. No real service is scheduled. No payment is collected.\nReview and decide (operator sign-in required): https://notary-512-pilot.oceanbags1-2225.chatgpt.site/?booking=${encodeURIComponent(b.id)}&operator=1`;
+  const message=`${label} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a private test. No real service is scheduled. No payment is collected.\nReview and decide (operator sign-in required): https://512notary.com/?booking=${encodeURIComponent(b.id)}&operator=1`;
   const insert=(type,due,subject)=>db.sql('INSERT INTO notifications (id, booking_id, owner, kind, recipient, subject, body, due_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',crypto.randomUUID(),b.id,b.owner,type,db.notificationRecipient||b.email,subject,`${message}\nName: ${b.name}\nContact email: ${b.email}\nRequested notarizations: ${b.quantity}`,due,db.notificationRecipient&&type!=='reminder'?'queued':'preview');
   const result=[insert(kind,now,`${ref} — ${kind}`)];
+  if(db.customerEmail&&b.owner.startsWith('guest:')){
+    const link=await managementUrl(db.env,b);
+    const customerBody=`${label} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\n${b.status==='pending_confirmation'?'Your request is awaiting confirmation. It is not a confirmed appointment.':''}\nFAMILY AND FRIENDS TEST: No real service is scheduled. No payment is collected.\nView, cancel, or reschedule using your private link (do not share):\n${link}\nQuestions? Reply to this email.`;
+    result.push(db.sql('INSERT INTO notifications (id, booking_id, owner, kind, recipient, subject, body, due_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',crypto.randomUUID(),b.id,b.owner,`customer_${kind}`,b.email,`${ref} — ${label}`,customerBody,now,'queued'));
+  }
   if(!['cancellation','confirmation','decline'].includes(kind)&&b.status==='test_confirmed')result.push(insert('reminder',Math.max(now,b.start-2*HOUR),`${ref} — appointment reminder`));
   return result;
 }
@@ -43,7 +49,7 @@ async function createBooking(db,owner,data,now){
   const b={id:bookingId,owner,provider:zone.provider,zip:data.zip,start:slot.start,end:slot.end,status:'pending_confirmation',...details};
   const statements=[db.sql('INSERT INTO bookings (id, owner, provider, zip, start, end, name, email, address, quantity, total, status, version, fingerprint, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',b.id,owner,b.provider,b.zip,b.start,b.end,b.name,b.email,b.address,b.quantity,7500,'pending_confirmation',1,digest,source(data.source),now),
     ...occupiedTimes(b.start).map(t=>db.sql('INSERT INTO slot_locks (provider, slot, booking_id) VALUES (?, ?, ?)',b.provider,t,b.id)),
-    ...noteStatements(db,b,'request_received',now)];
+    ...await noteStatements(db,b,'request_received',now)];
   try{await db.batch(statements);}catch(error){
     const repeated=await owned(db,bookingId,owner);
     if(repeated?.fingerprint===digest)return {booking:publicBooking(repeated),duplicate:true};
@@ -69,7 +75,7 @@ async function changeBooking(db,owner,bookingId,data,now){
   const statements=[sql,db.sql('DELETE FROM slot_locks WHERE booking_id = ?',b.id),
     ...(data.action==='reschedule'?occupiedTimes(updated.start).map(t=>db.sql('INSERT INTO slot_locks (provider, slot, booking_id) VALUES (?, ?, ?)',b.provider,t,b.id)):[]),
     db.sql("UPDATE notifications SET status = 'superseded' WHERE booking_id = ? AND kind = 'reminder' AND status = 'preview'",b.id),
-    ...noteStatements(db,updated,data.action==='cancel'?'cancellation':'reschedule',now)];
+    ...await noteStatements(db,updated,data.action==='cancel'?'cancellation':'reschedule',now)];
   try{await db.batch(statements);}catch(error){if(/constraint|UNIQUE/i.test(error.message))fail('The appointment changed or that time was taken. Your previous reservation is preserved; reload to see its latest status.',409);throw error;}
   return {booking:publicBooking(await owned(db,b.id,owner))};
 }
@@ -77,15 +83,21 @@ async function changeBooking(db,owner,bookingId,data,now){
 async function routeApi(request,env,now=Date.now()){
   const url=new URL(request.url),path=url.pathname;
   try{
-    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?'operator_test_email':'preview_only'});
+    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?(env.CUSTOMER_EMAIL_ENABLED==='true'?'customer_and_operator_test_email':'operator_test_email'):'preview_only'});
     const db=database(env);
+    if(request.method==='POST'&&path==='/api/guest-access'){
+      await body(request);await throttle(db,request,'guest',20,now);
+      const bookingId=crypto.randomUUID();return json({id:bookingId,token:await guestToken(env,bookingId,now+60*86400000)});
+    }
     if(request.method==='GET'&&path==='/api/availability'&&!url.searchParams.has('exclude')){
       const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
       const locks=await db.sql('SELECT slot FROM slot_locks WHERE provider = ? AND slot >= ?',zone.provider,now-HOUR).all();
       const occupied=new Set(locks.results.map(x=>x.slot));
       return json({zone,zip,rules:RULES,slots:scheduledSlots(now).map(slot=>({...slot,available:occupiedTimes(slot.start).every(t=>!occupied.has(t))}))});
     }
-    const owner=requireOwner(request);
+    const guest=await guestOwner(request,env,now);
+    const owner=guest||requireOwner(request);
+    if(guest&&request.method==='POST')await throttle(db,request,'writes',60,now);
     const operatorMatch=path.match(/^\/api\/operator\/bookings\/([a-zA-Z0-9-]{8,80})$/);
     if(operatorMatch){
       requireOperator(request);
@@ -101,7 +113,7 @@ async function routeApi(request,env,now=Date.now()){
             const updated={...b,status:target};
             const statements=[db.sql("UPDATE bookings SET status = ?, version = CASE WHEN version = ? AND status = 'pending_confirmation' THEN version + 1 ELSE NULL END WHERE id = ?",target,b.version,b.id),
               ...(target==='declined'?[db.sql('DELETE FROM slot_locks WHERE booking_id = ?',b.id)]:[]),
-              ...noteStatements(db,updated,target==='declined'?'decline':'confirmation',now)];
+              ...await noteStatements(db,updated,target==='declined'?'decline':'confirmation',now)];
             try{await db.batch(statements);}catch(error){if(/constraint/i.test(error.message))fail('This request changed. Reload before deciding.',409);throw error;}
           }
         }
@@ -128,11 +140,19 @@ async function routeApi(request,env,now=Date.now()){
     if(request.method==='GET'&&bookingMatch){
       const b=await readBooking(db,bookingMatch[1],owner);
       const notes=await db.sql('SELECT kind, recipient, subject, body, due_at, status FROM notifications WHERE booking_id = ? AND owner = ? ORDER BY due_at',b.id,owner).all();
-      return json({booking:publicBooking(b),notifications:notes.results});
+      return json({booking:publicBooking(b),notifications:guest?notes.results.filter(n=>n.kind.startsWith('customer_')):notes.results});
     }
     if(request.method==='POST'){
       const data=await body(request);
-      if(path==='/api/bookings')return json(await createBooking(db,owner,data,now),201);
+      if(path==='/api/bookings'){
+        if(guest&&data.id!==guest.slice(6))fail('Invalid request identifier.',403);
+        if(guest&&!await owned(db,data.id,owner)){
+          await throttle(db,request,'bookings',5,now);
+          const recent=await db.sql('SELECT COUNT(*) AS n FROM bookings WHERE email = ? AND created_at > ?',email(data.email),now-86400000).first();
+          if(recent.n>=3)fail('This email has reached the daily test request limit.',429);
+        }
+        return json(await createBooking(db,owner,data,now),201);
+      }
       if(bookingMatch){if(data.action==='retry_email')return json({booking:publicBooking(await readBooking(db,bookingMatch[1],owner))});return json(await changeBooking(db,owner,bookingMatch[1],data,now));}
       if(path==='/api/inquiries'){
         const requestId=id(data.id),kind=['coverage','time'].includes(data.kind)?data.kind:fail('Invalid request type.');
@@ -159,7 +179,7 @@ export async function handleApi(request,env,now=Date.now()){
   const response=await routeApi(request,env,now);
   if(request.method==='POST'&&response.ok&&/^\/api\/bookings(?:\/[^/]+)?$/.test(new URL(request.url).pathname)){
     const result=await response.clone().json();
-    if(result.booking)try{await deliverNotifications(database(env),env,result.booking.id,requireOwner(request),now);}catch{console.error('Email delivery status unavailable; booking preserved.');}
+    if(result.booking)try{await deliverNotifications(database(env),env,result.booking.id,await guestOwner(request,env,now)||requireOwner(request),now);}catch{console.error('Email delivery status unavailable; booking preserved.');}
   }
   return response;
 }
