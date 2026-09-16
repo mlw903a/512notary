@@ -1,7 +1,7 @@
 import {mkdir,readFile,writeFile,cp} from 'node:fs/promises';
 import {build} from 'esbuild';
 await mkdir('.build',{recursive:true});
-const types={'index.html':'text/html; charset=utf-8','styles.css':'text/css; charset=utf-8','app.js':'text/javascript; charset=utf-8'};
+const types={'index.html':'text/html; charset=utf-8','styles.css':'text/css; charset=utf-8','app.js':'text/javascript; charset=utf-8','admin.html':'text/html; charset=utf-8','admin.css':'text/css; charset=utf-8','admin.js':'text/javascript; charset=utf-8'};
 const assets={};for(const [file,type] of Object.entries(types))assets[`/${file}`]={body:await readFile(`public/${file}`,'utf8'),type};
 await writeFile('.build/assets.mjs',`export default ${JSON.stringify(assets)};`);
 await build({entryPoints:['server/worker.mjs'],outfile:'dist/server/index.js',bundle:true,format:'esm',platform:'browser',target:'es2022'});

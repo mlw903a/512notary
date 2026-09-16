@@ -1,5 +1,9 @@
 # Family-and-friends guest booking
 
+## Admin calendar
+
+`/admin` requires ChatGPT sign-in as mlw903@gmail.com or mark@oceanbags.com. It shows a seven-day Central Time agenda, provider filters, optional cancelled/declined history, customer details and existing operator decisions. Manual blocks apply immediately to customer availability. SQLite triggers arbitrate block/booking conflicts within transactions, including the one-hour travel buffer. Removing a block only removes that block. Block reasons are never returned by public availability. This is the app's own calendar, not Google/Apple calendar synchronization. Pending requests do not automatically expire yet.
+
 Public booking uses a server-signed, per-request capability, not a ChatGPT account. The private URL carries the capability in its fragment; API calls carry it in `X-Booking-Access`. Booking IDs alone grant no access. Guest capabilities never authorize operator decisions. Existing ChatGPT-owned records remain accessible using their original identity.
 
 Production requires secret `GUEST_LINK_SECRET`, secret `RESEND_API_KEY`, `NOTIFICATION_EMAIL=mlw903@gmail.com`, and `CUSTOMER_EMAIL_ENABLED=true`. Keep secrets in Sites environment settings, never Git. Rotating the guest secret invalidates existing private links. Issued draft capabilities expire in 60 days; emailed management links expire 30 days after the selected appointment time. Do not share these links.

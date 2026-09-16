@@ -15,6 +15,13 @@
       "when": 1789592519177,
       "tag": "0001_bumpy_patriot",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1789599648286,
+      "tag": "0002_amazing_wallop",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,8 @@
 import { sqliteTable, text, integer, primaryKey, index } from 'drizzle-orm/sqlite-core';
 export const rateLimits = sqliteTable('rate_limits', {bucket:text('bucket').primaryKey(),hits:integer('hits').notNull()});
+export const calendarBlocks = sqliteTable('calendar_blocks', {
+  id:text('id').primaryKey(), provider:text('provider').notNull(), start:integer('start').notNull(), end:integer('end').notNull(), reason:text('reason').notNull(), createdAt:integer('created_at').notNull()
+},table=>[index('calendar_blocks_provider_start').on(table.provider,table.start)]);
 
 export const bookings = sqliteTable('bookings', {
   id: text('id').primaryKey(), owner: text('owner').notNull(),

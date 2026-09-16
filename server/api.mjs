@@ -1,6 +1,7 @@
 import {database} from './database.mjs';
 import {deliverNotifications} from './email.mjs';
 import {guestToken,guestOwner,managementUrl,throttle} from './guest.mjs';
+import {operator,calendar,changeBlock,blockedHours} from './admin.mjs';
 import {ZONES,RULES,HOUR,scheduledSlots,validSlot,occupiedTimes,formatWhen} from './schedule.mjs';
 
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
@@ -53,7 +54,7 @@ async function createBooking(db,owner,data,now){
   try{await db.batch(statements);}catch(error){
     const repeated=await owned(db,bookingId,owner);
     if(repeated?.fingerprint===digest)return {booking:publicBooking(repeated),duplicate:true};
-    if(/UNIQUE|constraint/i.test(error.message))fail('That appointment was just reserved. Please choose another time.',409);
+    if(/UNIQUE|constraint|calendar conflict/i.test(error.message))fail('That appointment was just reserved or blocked. Please choose another time.',409);
     throw error;
   }
   return {booking:publicBooking(await owned(db,b.id,owner)),duplicate:false};
@@ -76,7 +77,7 @@ async function changeBooking(db,owner,bookingId,data,now){
     ...(data.action==='reschedule'?occupiedTimes(updated.start).map(t=>db.sql('INSERT INTO slot_locks (provider, slot, booking_id) VALUES (?, ?, ?)',b.provider,t,b.id)):[]),
     db.sql("UPDATE notifications SET status = 'superseded' WHERE booking_id = ? AND kind = 'reminder' AND status = 'preview'",b.id),
     ...await noteStatements(db,updated,data.action==='cancel'?'cancellation':'reschedule',now)];
-  try{await db.batch(statements);}catch(error){if(/constraint|UNIQUE/i.test(error.message))fail('The appointment changed or that time was taken. Your previous reservation is preserved; reload to see its latest status.',409);throw error;}
+  try{await db.batch(statements);}catch(error){if(/constraint|UNIQUE|calendar conflict/i.test(error.message))fail('The appointment changed or that time was taken. Your previous reservation is preserved; reload to see its latest status.',409);throw error;}
   return {booking:publicBooking(await owned(db,b.id,owner))};
 }
 
@@ -85,6 +86,12 @@ async function routeApi(request,env,now=Date.now()){
   try{
     if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?(env.CUSTOMER_EMAIL_ENABLED==='true'?'customer_and_operator_test_email':'operator_test_email'):'preview_only'});
     const db=database(env);
+    if(path==='/api/operator/calendar'||path==='/api/operator/blocks'){
+      operator(request);
+      if(request.method==='GET'&&path.endsWith('/calendar'))return json(await calendar(db,url.searchParams.get('date')));
+      if(request.method==='POST'&&path.endsWith('/blocks'))return json(await changeBlock(db,await body(request),now));
+      fail('Method not allowed.',405);
+    }
     if(request.method==='POST'&&path==='/api/guest-access'){
       await body(request);await throttle(db,request,'guest',20,now);
       const bookingId=crypto.randomUUID();return json({id:bookingId,token:await guestToken(env,bookingId,now+60*86400000)});
@@ -92,7 +99,7 @@ async function routeApi(request,env,now=Date.now()){
     if(request.method==='GET'&&path==='/api/availability'&&!url.searchParams.has('exclude')){
       const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
       const locks=await db.sql('SELECT slot FROM slot_locks WHERE provider = ? AND slot >= ?',zone.provider,now-HOUR).all();
-      const occupied=new Set(locks.results.map(x=>x.slot));
+      const occupied=new Set([...locks.results.map(x=>x.slot),...await blockedHours(db,zone.provider,now)]);
       return json({zone,zip,rules:RULES,slots:scheduledSlots(now).map(slot=>({...slot,available:occupiedTimes(slot.start).every(t=>!occupied.has(t))}))});
     }
     const guest=await guestOwner(request,env,now);
@@ -127,7 +134,7 @@ async function routeApi(request,env,now=Date.now()){
       const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
       const exclude=url.searchParams.get('exclude');if(exclude)await readBooking(db,exclude,owner);
       const locks=await db.sql('SELECT slot FROM slot_locks WHERE provider = ? AND slot >= ? AND booking_id != ?',zone.provider,now-HOUR,exclude??'').all();
-      const occupied=new Set(locks.results.map(x=>x.slot));
+      const occupied=new Set([...locks.results.map(x=>x.slot),...await blockedHours(db,zone.provider,now)]);
       return json({zone,zip,rules:RULES,slots:scheduledSlots(now).map(slot=>({...slot,available:occupiedTimes(slot.start).every(t=>!occupied.has(t))}))});
     }
     if(request.method==='GET'&&path==='/api/bookings'){
