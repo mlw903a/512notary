@@ -4,7 +4,7 @@ import {ZONES,RULES,HOUR,scheduledSlots,validSlot,occupiedTimes,formatWhen} from
 
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
 const json=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
-const requireOwner=request=>request.headers.get('oai-authenticated-user-id')||fail('Sign in to the private pilot to use saved bookings.',401);
+const requireOwner=request=>request.headers.get('oai-authenticated-user-id')||fail('Sign in with ChatGPT to save or manage a test request.',401);
 const requireOperator=request=>{requireOwner(request);if(!['mark@oceanbags.com','mlw903@gmail.com'].includes((request.headers.get('oai-authenticated-user-email')||'').toLowerCase()))fail('Only the pilot operator can make appointment decisions.',403);};
 function text(value,label,max=200){if(typeof value!=='string'||!value.trim()||value.length>max)fail(`Enter a valid ${label}.`);return value.trim();}
 function email(value){const v=text(value,'email',160);if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v))fail('Enter a valid email.');return v;}
@@ -78,7 +78,14 @@ async function routeApi(request,env,now=Date.now()){
   const url=new URL(request.url),path=url.pathname;
   try{
     if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?'operator_test_email':'preview_only'});
-    const owner=requireOwner(request),db=database(env);
+    const db=database(env);
+    if(request.method==='GET'&&path==='/api/availability'&&!url.searchParams.has('exclude')){
+      const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
+      const locks=await db.sql('SELECT slot FROM slot_locks WHERE provider = ? AND slot >= ?',zone.provider,now-HOUR).all();
+      const occupied=new Set(locks.results.map(x=>x.slot));
+      return json({zone,zip,rules:RULES,slots:scheduledSlots(now).map(slot=>({...slot,available:occupiedTimes(slot.start).every(t=>!occupied.has(t))}))});
+    }
+    const owner=requireOwner(request);
     const operatorMatch=path.match(/^\/api\/operator\/bookings\/([a-zA-Z0-9-]{8,80})$/);
     if(operatorMatch){
       requireOperator(request);

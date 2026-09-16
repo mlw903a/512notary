@@ -8,6 +8,14 @@ import {openDatabase} from '../scripts/local-db.mjs';
 import {epoch,HOUR,scheduledSlots,validSlot,centralParts} from '../server/schedule.mjs';
 const now=epoch('2026-09-14',6),start=epoch('2026-09-15',8);
 const input=(zip='78732',time=start)=>({id:crypto.randomUUID(),zip,start:time,name:'Test Customer',email:'alex@example.com',address:'123 Example Lane',quantity:5,ready:true,total:1,source:{utm_source:'test'}});
+test('public review exposes availability but not saved records or operator actions',async t=>{
+ const DB=openDatabase();t.after(()=>DB.close());
+ const availability=await call(DB,'/api/availability?zip=78732',undefined,null);assert.equal(availability.status,200);assert.ok(availability.data.slots.length);assert.equal(availability.data.bookings,undefined);
+ assert.equal((await call(DB,'/api/bookings',undefined,null)).status,401);
+ assert.equal((await call(DB,'/api/bookings',input(),null)).status,401);
+ assert.equal((await call(DB,'/api/availability?zip=78732&exclude=not-owned',undefined,null)).status,401);
+ assert.equal((await call(DB,'/api/operator/bookings/not-owned',{action:'confirm',version:1},null)).status,401);
+});
 async function call(DB,path='/api/bookings',data,owner='tester',extra={}){const request=new Request(`https://test.invalid${path}`,{method:data?'POST':'GET',headers:{...(owner?{'oai-authenticated-user-id':owner}:{}),...(data?{'Content-Type':'application/json',Origin:'https://test.invalid'}:{}),...extra},...(data?{body:JSON.stringify(data)}:{})});const response=await handleApi(request,{DB},now);return {status:response.status,data:await response.json()};}
 test('schedule is Mon–Sat, 8–18 Central; last start 17; two-hour lead',()=>{
   const slots=scheduledSlots(now);assert.ok(slots.length>200);
