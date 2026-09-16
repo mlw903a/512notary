@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {handleApi} from '../server/api.mjs';
+import {openDatabase} from '../scripts/local-db.mjs';
+import {epoch} from '../server/schedule.mjs';
+test('operator decisions authorize, preserve locks, release declined slots, and require reconfirmation',async t=>{
+ const DB=openDatabase();t.after(()=>DB.close());const now=epoch('2026-09-14',6),id=crypto.randomUUID();
+ const call=async(path,data,email='customer@example.com',owner='customer')=>{const response=await handleApi(new Request(`https://test.invalid${path}`,{method:data?'POST':'GET',headers:{'oai-authenticated-user-id':owner,'oai-authenticated-user-email':email,Origin:'https://test.invalid','Content-Type':'application/json'},...(data?{body:JSON.stringify(data)}:{})}),{DB},now);return {status:response.status,data:await response.json()};};
+ await call('/api/bookings',{id,zip:'78732',start:epoch('2026-09-15',8),name:'Test',email:'customer@example.com',address:'Example Lane',quantity:1,ready:true});
+ const path=`/api/operator/bookings/${id}`,op=(data)=>call(path,data,'mlw903@gmail.com','operator');
+ assert.equal((await call(path,{action:'confirm',version:1})).status,403);
+ assert.equal((await op()).data.booking.status,'pending_confirmation');
+ assert.equal((await op({action:'confirm',version:99})).status,409);
+ assert.equal((await op({action:'confirm',version:1})).data.booking.status,'test_confirmed');
+ assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM slot_locks').first()).n,2);
+ await op({action:'confirm',version:1});assert.equal((await DB.prepare("SELECT COUNT(*) AS n FROM notifications WHERE kind='confirmation'").first()).n,1);
+ assert.equal((await op({action:'decline',version:2})).status,409);
+ const moved=await call(`/api/bookings/${id}`,{action:'reschedule',version:2,start:epoch('2026-09-15',11)});assert.equal(moved.data.booking.status,'pending_confirmation');
+ assert.equal((await op({action:'decline',version:3})).data.booking.status,'declined');
+ assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM slot_locks').first()).n,0);
+ assert.equal((await op({action:'confirm',version:4})).status,409);
+ const notes=(await op()).data.notifications;assert.ok(notes.some(n=>n.kind==='decline'&&n.body.includes('&operator=1')));
+});

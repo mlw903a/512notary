@@ -5,6 +5,7 @@ import {ZONES,RULES,HOUR,scheduledSlots,validSlot,occupiedTimes,formatWhen} from
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
 const json=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'}});
 const requireOwner=request=>request.headers.get('oai-authenticated-user-id')||fail('Sign in to the private pilot to use saved bookings.',401);
+const requireOperator=request=>{requireOwner(request);if(!['mark@oceanbags.com','mlw903@gmail.com'].includes((request.headers.get('oai-authenticated-user-email')||'').toLowerCase()))fail('Only the pilot operator can make appointment decisions.',403);};
 function text(value,label,max=200){if(typeof value!=='string'||!value.trim()||value.length>max)fail(`Enter a valid ${label}.`);return value.trim();}
 function email(value){const v=text(value,'email',160);if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v))fail('Enter a valid email.');return v;}
 function id(value){if(typeof value!=='string'||!/^[a-zA-Z0-9-]{8,80}$/.test(value))fail('Invalid request identifier.');return value;}
@@ -21,10 +22,11 @@ function publicBooking(b){const {owner,fingerprint,...safe}=b;return {...safe,so
 const owned=(db,bookingId,owner)=>db.sql('SELECT * FROM bookings WHERE id = ? AND owner = ?',bookingId,owner).first();
 function noteStatements(db,b,kind,now){
   const ref=`512-${b.id.slice(0,8).toUpperCase()}`;
-  const message=`${kind==='cancellation'?'Cancelled test request':b.status==='pending_confirmation'?'Appointment request awaiting confirmation':'Test appointment'} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a private test. A request is not a confirmed appointment. No real service is scheduled.`;
+  const label=b.status==='declined'?'Request declined':kind==='confirmation'?'Appointment confirmed for testing':kind==='cancellation'?'Cancelled test request':b.status==='pending_confirmation'?'Appointment request awaiting confirmation':'Test appointment';
+  const message=`${label} ${ref}\n${ZONES[b.zip].name} · ${formatWhen(b.start)}\n${b.address}\nTravel + up to 5 notarizations for one signer: $75.00\nThis is a private test. No real service is scheduled. No payment is collected.\nReview and decide (operator sign-in required): https://notary-512-pilot.oceanbags1-2225.chatgpt.site/?booking=${encodeURIComponent(b.id)}&operator=1`;
   const insert=(type,due,subject)=>db.sql('INSERT INTO notifications (id, booking_id, owner, kind, recipient, subject, body, due_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',crypto.randomUUID(),b.id,b.owner,type,db.notificationRecipient||b.email,subject,`${message}\nName: ${b.name}\nContact email: ${b.email}\nRequested notarizations: ${b.quantity}`,due,db.notificationRecipient&&type!=='reminder'?'queued':'preview');
   const result=[insert(kind,now,`${ref} — ${kind}`)];
-  if(kind!=='cancellation'&&b.status!=='pending_confirmation')result.push(insert('reminder',Math.max(now,b.start-2*HOUR),`${ref} — appointment reminder`));
+  if(!['cancellation','confirmation','decline'].includes(kind)&&b.status==='test_confirmed')result.push(insert('reminder',Math.max(now,b.start-2*HOUR),`${ref} — appointment reminder`));
   return result;
 }
 async function readBooking(db,bookingId,owner){const b=await owned(db,bookingId,owner);if(!b)fail('Appointment not found.',404);return b;}
@@ -58,8 +60,8 @@ async function changeBooking(db,owner,bookingId,data,now){
   let sql,updated;
   if(data.action==='reschedule'){
     const slot=validSlot(data.start,now);if(!slot)fail('Choose a time within the available schedule.',409);
-    updated={...b,start:slot.start,end:slot.end};
-    sql=db.sql("UPDATE bookings SET start = ?, end = ?, version = CASE WHEN version = ? AND status IN ('test_confirmed', 'pending_confirmation') THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",slot.start,slot.end,b.version,b.id,owner);
+    updated={...b,start:slot.start,end:slot.end,status:'pending_confirmation'};
+    sql=db.sql("UPDATE bookings SET start = ?, end = ?, status = 'pending_confirmation', version = CASE WHEN version = ? AND status IN ('test_confirmed', 'pending_confirmation') THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",slot.start,slot.end,b.version,b.id,owner);
   }else if(data.action==='cancel'){
     updated={...b,status:'cancelled'};
     sql=db.sql("UPDATE bookings SET status = 'cancelled', version = CASE WHEN version = ? AND status IN ('test_confirmed', 'pending_confirmation') THEN version + 1 ELSE NULL END WHERE id = ? AND owner = ?",b.version,b.id,owner);
@@ -77,6 +79,31 @@ async function routeApi(request,env,now=Date.now()){
   try{
     if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?'operator_test_email':'preview_only'});
     const owner=requireOwner(request),db=database(env);
+    const operatorMatch=path.match(/^\/api\/operator\/bookings\/([a-zA-Z0-9-]{8,80})$/);
+    if(operatorMatch){
+      requireOperator(request);
+      let b=await db.sql('SELECT * FROM bookings WHERE id = ?',operatorMatch[1]).first();if(!b)fail('Appointment not found.',404);
+      if(request.method==='POST'){
+        const data=await body(request);
+        if(!['confirm','decline','retry_email'].includes(data.action))fail('Unknown operator action.');
+        if(data.action!=='retry_email'){
+          const target=data.action==='confirm'?'test_confirmed':'declined';
+          if(b.status!==target){
+            if(b.status!=='pending_confirmation'||b.version!==data.version)fail('This request changed. Reload before deciding.',409);
+            if(data.action==='confirm'&&b.start<=now)fail('This appointment time has passed. Choose a new time before confirming.',409);
+            const updated={...b,status:target};
+            const statements=[db.sql("UPDATE bookings SET status = ?, version = CASE WHEN version = ? AND status = 'pending_confirmation' THEN version + 1 ELSE NULL END WHERE id = ?",target,b.version,b.id),
+              ...(target==='declined'?[db.sql('DELETE FROM slot_locks WHERE booking_id = ?',b.id)]:[]),
+              ...noteStatements(db,updated,target==='declined'?'decline':'confirmation',now)];
+            try{await db.batch(statements);}catch(error){if(/constraint/i.test(error.message))fail('This request changed. Reload before deciding.',409);throw error;}
+          }
+        }
+        try{await deliverNotifications(db,env,b.id,b.owner,now);}catch{console.error('Decision saved; email status unavailable.');}
+        b=await db.sql('SELECT * FROM bookings WHERE id = ?',b.id).first();
+      }else if(request.method!=='GET')fail('Method not allowed.',405);
+      const notes=await db.sql('SELECT kind, recipient, subject, body, due_at, status FROM notifications WHERE booking_id = ? ORDER BY due_at',b.id).all();
+      return json({booking:publicBooking(b),notifications:notes.results,operator:true});
+    }
     if(request.method==='GET'&&path==='/api/availability'){
       const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
       const exclude=url.searchParams.get('exclude');if(exclude)await readBooking(db,exclude,owner);
