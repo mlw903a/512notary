@@ -2,6 +2,7 @@ import {database} from './database.mjs';
 import {deliverNotifications} from './email.mjs';
 import {guestToken,guestOwner,managementUrl,throttle} from './guest.mjs';
 import {operator,calendar,changeBlock,blockedHours} from './admin.mjs';
+import {activeZones} from './brand.mjs';
 import {ZONES,RULES,HOUR,scheduledSlots,validSlot,occupiedTimes,formatWhen} from './schedule.mjs';
 
 const fail=(message,status=400)=>{throw Object.assign(new Error(message),{status});};
@@ -38,7 +39,7 @@ async function noteStatements(db,b,kind,now){
 }
 async function readBooking(db,bookingId,owner){const b=await owned(db,bookingId,owner);if(!b)fail('Appointment not found.',404);return b;}
 async function createBooking(db,owner,data,now){
-  const bookingId=id(data.id),zone=ZONES[data.zip];
+  const bookingId=id(data.id),zone=activeZones(db.env)[data.zip];
   if(!zone)fail('This address needs a coverage review before booking.');
   const details={name:text(data.name,'name',100),email:email(data.email),address:text(data.address,'meeting address'),quantity:Number(data.quantity)};
   if(!Number.isInteger(details.quantity)||details.quantity<1||details.quantity>5)fail('Choose between one and five notarizations.');
@@ -84,7 +85,7 @@ async function changeBooking(db,owner,bookingId,data,now){
 async function routeApi(request,env,now=Date.now()){
   const url=new URL(request.url),path=url.pathname;
   try{
-    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?(env.CUSTOMER_EMAIL_ENABLED==='true'?'customer_and_operator_test_email':'operator_test_email'):'preview_only'});
+    if(request.method==='GET'&&path==='/api/config')return json({mode:'test',rules:RULES,zones:ZONES,activeZones:activeZones(env),payments:'not_requested',email:env.RESEND_API_KEY&&env.NOTIFICATION_EMAIL==='mlw903@gmail.com'?(env.CUSTOMER_EMAIL_ENABLED==='true'?'customer_and_operator_test_email':'operator_test_email'):'preview_only'});
     const db=database(env);
     if(path==='/api/operator/calendar'||path==='/api/operator/blocks'){
       operator(request);
@@ -97,7 +98,7 @@ async function routeApi(request,env,now=Date.now()){
       const bookingId=crypto.randomUUID();return json({id:bookingId,token:await guestToken(env,bookingId,now+60*86400000)});
     }
     if(request.method==='GET'&&path==='/api/availability'&&!url.searchParams.has('exclude')){
-      const zip=url.searchParams.get('zip'),zone=ZONES[zip];if(!zone)fail('Coverage review required.');
+      const zip=url.searchParams.get('zip'),zone=activeZones(env)[zip];if(!zone)fail('Coverage review required.');
       const locks=await db.sql('SELECT slot FROM slot_locks WHERE provider = ? AND slot >= ?',zone.provider,now-HOUR).all();
       const occupied=new Set([...locks.results.map(x=>x.slot),...await blockedHours(db,zone.provider,now)]);
       return json({zone,zip,rules:RULES,slots:scheduledSlots(now).map(slot=>({...slot,available:occupiedTimes(slot.start).every(t=>!occupied.has(t))}))});

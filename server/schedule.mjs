@@ -2,7 +2,8 @@ export const HOUR = 3600000;
 export const ZONES = Object.freeze({
   '78732': { name: 'Northwest Austin', provider: 'mark' },
   '78653': { name: 'Manor', provider: 'haydn' },
-  '78602': { name: 'Bastrop', provider: 'haydn' }
+  '78602': { name: 'Bastrop', provider: 'haydn' },
+  '78621': { name: 'Elgin', provider: 'haydn' }
 });
 export const RULES = Object.freeze({timeZone:'America/Chicago',open:8,close:18,days:[1,2,3,4,5,6],durationMinutes:60,travelBufferMinutes:60,leadHours:2,horizonDays:28,totalCents:7500,maxNotarizations:5});
 export function centralParts(time) {
